@@ -444,7 +444,7 @@ function illustratorShapeDefinition(shape: ShapeItem, index: number) {
   if (!svgSource) {
     return {
       vector: false,
-      markup: `<symbol id="ai-shape-${index}" viewBox="0 0 1 1"><image href="${escapeXml(shape.url)}" x="0" y="0" width="1" height="1" preserveAspectRatio="xMidYMid meet"/></symbol>`,
+      markup: `<symbol id="ai-shape-${index}" viewBox="0 0 1 1"><image href="${escapeXml(shape.url)}" xlink:href="${escapeXml(shape.url)}" x="0" y="0" width="1" height="1" preserveAspectRatio="xMidYMid meet"/></symbol>`,
     };
   }
 
@@ -543,13 +543,13 @@ function buildCompactIllustratorSvg(
       const x = centerX - drawSize / 2;
       const y = centerY - drawSize / 2;
       const color = shapes[shapeIndex].color;
-      uses.push(`<use href="#ai-shape-${shapeIndex}" x="${x.toFixed(3)}" y="${y.toFixed(3)}" width="${drawSize.toFixed(3)}" height="${drawSize.toFixed(3)}" preserveAspectRatio="xMidYMid meet" fill="${escapeXml(color)}" color="${escapeXml(color)}" transform="rotate(${options.rotation} ${centerX.toFixed(3)} ${centerY.toFixed(3)})"/>`);
+      uses.push(`<use href="#ai-shape-${shapeIndex}" xlink:href="#ai-shape-${shapeIndex}" x="${x.toFixed(3)}" y="${y.toFixed(3)}" width="${drawSize.toFixed(3)}" height="${drawSize.toFixed(3)}" preserveAspectRatio="xMidYMid meet" fill="${escapeXml(color)}" color="${escapeXml(color)}" transform="rotate(${options.rotation} ${centerX.toFixed(3)} ${centerY.toFixed(3)})"/>`);
     }
   }
 
   const background = options.transparent ? "" : `<rect width="100%" height="100%" fill="${escapeXml(options.background)}"/>`;
   const svg = `<?xml version="1.0" encoding="UTF-8"?>
-<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" version="1.1" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">
   <title>Brand Shape Studio — Compact Illustrator SVG</title>
   <desc>Reusable symbols keep this file compact. In Illustrator, select all and use Object > Expand to edit individual instances.</desc>
   <defs>${definitions.map(({ markup }) => markup).join("\n")}</defs>

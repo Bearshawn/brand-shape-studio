@@ -13,6 +13,10 @@
 - Export compact Illustrator-compatible SVGs using reusable vector symbols.
 - Keep the left upload panel and canvas fixed while the long right control panel scrolls independently on desktop.
 
+## Version 1.2.1
+
+- Add SVG 1.1 and legacy `xlink:href` references alongside modern `href` references for broader Adobe Illustrator compatibility.
+
 Vercel-ready Vite React version of Brand Shape Studio.
 
 ## Local development
