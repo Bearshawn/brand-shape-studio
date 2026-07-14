@@ -8,6 +8,11 @@
 - Use up to 200 columns.
 - Export static compositions as SVG.
 
+## Version 1.2
+
+- Export compact Illustrator-compatible SVGs using reusable vector symbols.
+- Keep the left upload panel and canvas fixed while the long right control panel scrolls independently on desktop.
+
 Vercel-ready Vite React version of Brand Shape Studio.
 
 ## Local development

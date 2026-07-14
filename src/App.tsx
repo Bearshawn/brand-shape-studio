@@ -426,6 +426,139 @@ function buildMosaicSvg(
 </svg>`;
 }
 
+function decodeSvgDataUrl(url: string) {
+  if (!url.startsWith("data:image/svg+xml")) return null;
+  const comma = url.indexOf(",");
+  if (comma < 0) return null;
+  try {
+    const header = url.slice(0, comma);
+    const payload = url.slice(comma + 1);
+    return header.includes(";base64") ? window.atob(payload) : decodeURIComponent(payload);
+  } catch {
+    return null;
+  }
+}
+
+function illustratorShapeDefinition(shape: ShapeItem, index: number) {
+  const svgSource = decodeSvgDataUrl(shape.url);
+  if (!svgSource) {
+    return {
+      vector: false,
+      markup: `<symbol id="ai-shape-${index}" viewBox="0 0 1 1"><image href="${escapeXml(shape.url)}" x="0" y="0" width="1" height="1" preserveAspectRatio="xMidYMid meet"/></symbol>`,
+    };
+  }
+
+  const documentNode = new DOMParser().parseFromString(svgSource, "image/svg+xml");
+  const root = documentNode.documentElement;
+  if (root.nodeName.toLowerCase() === "parsererror") {
+    return { vector: false, markup: "" };
+  }
+
+  root.querySelectorAll("path,rect,circle,ellipse,polygon,polyline,line,text").forEach((element) => {
+    const fill = element.getAttribute("fill");
+    const stroke = element.getAttribute("stroke");
+    if (fill !== "none") element.setAttribute("fill", "currentColor");
+    if (stroke && stroke !== "none") element.setAttribute("stroke", "currentColor");
+    const style = element.getAttribute("style");
+    if (style) {
+      const cleaned = style
+        .replace(/(^|;)\s*fill\s*:[^;]*/gi, "$1")
+        .replace(/(^|;)\s*stroke\s*:[^;]*/gi, "$1");
+      cleaned.trim().replace(/^;+|;+$/g, "")
+        ? element.setAttribute("style", cleaned)
+        : element.removeAttribute("style");
+    }
+  });
+
+  const viewBox = root.getAttribute("viewBox")
+    ?? `0 0 ${root.getAttribute("width") ?? 100} ${root.getAttribute("height") ?? 100}`;
+  const serializer = new XMLSerializer();
+  const content = Array.from(root.childNodes).map((node) => serializer.serializeToString(node)).join("");
+  return {
+    vector: true,
+    markup: `<symbol id="ai-shape-${index}" viewBox="${escapeXml(viewBox)}" overflow="visible">${content}</symbol>`,
+  };
+}
+
+function buildCompactIllustratorSvg(
+  source: CanvasImageSource,
+  shapes: ShapeItem[],
+  options: RenderOptions,
+  width: number,
+  height: number,
+) {
+  const cell = width / options.columns;
+  const rows = Math.round(height / cell);
+  const analysis = document.createElement("canvas");
+  analysis.width = options.columns;
+  analysis.height = rows;
+  const analysisContext = analysis.getContext("2d", { willReadFrequently: true });
+  if (!analysisContext) return null;
+
+  const sourceSize = getSourceSize(source);
+  drawSource(
+    analysisContext,
+    source,
+    sourceSize.width,
+    sourceSize.height,
+    options.columns,
+    rows,
+    options.fit,
+    options.sourceZoom,
+    options.sourceOffsetX,
+    options.sourceOffsetY,
+  );
+  const pixels = analysisContext.getImageData(0, 0, options.columns, rows).data;
+  const definitions = shapes.map(illustratorShapeDefinition);
+  const uses: string[] = [];
+
+  for (let row = 0; row < rows; row += 1) {
+    for (let column = 0; column < options.columns; column += 1) {
+      const pixelIndex = (row * options.columns + column) * 4;
+      const red = pixels[pixelIndex];
+      const green = pixels[pixelIndex + 1];
+      const blue = pixels[pixelIndex + 2];
+      let luminance = (0.2126 * red + 0.7152 * green + 0.0722 * blue) / 255;
+      const inputRange = Math.max(1 / 255, (options.inputWhite - options.inputBlack) / 255);
+      luminance = clamp((luminance - options.inputBlack / 255) / inputRange);
+      luminance = Math.pow(luminance, 1 / options.gamma);
+      luminance = options.outputBlack / 255 + luminance * ((options.outputWhite - options.outputBlack) / 255);
+      luminance = clamp((luminance - 0.5) * options.contrast + 0.5 + options.threshold);
+      const weight = clamp(options.inverted ? luminance : 1 - luminance);
+
+      let shapeIndex = 0;
+      if (options.mapping === "tone") {
+        shapeIndex = Math.min(shapes.length - 1, Math.floor((1 - weight) * shapes.length));
+      } else if (options.mapping === "sequence") {
+        shapeIndex = (column + row) % shapes.length;
+      } else {
+        shapeIndex = Math.floor(seededRandom(column, row) * shapes.length);
+      }
+
+      const scale = options.minScale + weight * (options.maxScale - options.minScale);
+      const drawSize = cell * scale;
+      if (scale <= 0.025 || drawSize < 1.5 || !definitions[shapeIndex]?.markup) continue;
+      const centerX = column * cell + cell / 2;
+      const centerY = row * cell + cell / 2;
+      const x = centerX - drawSize / 2;
+      const y = centerY - drawSize / 2;
+      const color = shapes[shapeIndex].color;
+      uses.push(`<use href="#ai-shape-${shapeIndex}" x="${x.toFixed(3)}" y="${y.toFixed(3)}" width="${drawSize.toFixed(3)}" height="${drawSize.toFixed(3)}" preserveAspectRatio="xMidYMid meet" fill="${escapeXml(color)}" color="${escapeXml(color)}" transform="rotate(${options.rotation} ${centerX.toFixed(3)} ${centerY.toFixed(3)})"/>`);
+    }
+  }
+
+  const background = options.transparent ? "" : `<rect width="100%" height="100%" fill="${escapeXml(options.background)}"/>`;
+  const svg = `<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">
+  <title>Brand Shape Studio — Compact Illustrator SVG</title>
+  <desc>Reusable symbols keep this file compact. In Illustrator, select all and use Object > Expand to edit individual instances.</desc>
+  <defs>${definitions.map(({ markup }) => markup).join("\n")}</defs>
+  ${background}
+  ${uses.join("\n  ")}
+</svg>`;
+  return { svg, rasterCount: definitions.filter(({ vector }) => !vector).length, instanceCount: uses.length };
+}
+
 export default function ShapeStudio() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const histogramRef = useRef<HTMLCanvasElement>(null);
@@ -908,6 +1041,31 @@ export default function ShapeStudio() {
     setMessage(`SVG exported with ${columns} columns at ${imageDimensions.width} × ${imageDimensions.height}px.`);
   }
 
+  function exportIllustratorSvg() {
+    if (mediaKind !== "image") {
+      setMessage("Illustrator SVG export is available for still images only.");
+      return;
+    }
+    const source = sourceRef.current;
+    if (!source || !shapes.length) {
+      setMessage("Add a source image and at least one shape before exporting.");
+      return;
+    }
+    const result = buildCompactIllustratorSvg(source, shapes, options, imageDimensions.width, imageDimensions.height);
+    if (!result) {
+      setMessage("The Illustrator SVG could not be created in this browser.");
+      return;
+    }
+    downloadBlob(
+      new Blob([result.svg], { type: "image/svg+xml;charset=utf-8" }),
+      `brand-shape-illustrator-compact-${imageDimensions.width}x${imageDimensions.height}.svg`,
+    );
+    const rasterNote = result.rasterCount
+      ? ` ${result.rasterCount} raster shape${result.rasterCount === 1 ? " was" : "s were"} embedded; upload SVG shapes for fully vector artwork.`
+      : " All uploaded shapes are reusable vector symbols.";
+    setMessage(`Compact Illustrator SVG exported with ${result.instanceCount.toLocaleString()} instances.${rasterNote}`);
+  }
+
   async function exportVideo() {
     const video = videoRef.current;
     if (!video || !shapes.length || typeof MediaRecorder === "undefined") {
@@ -1204,8 +1362,10 @@ export default function ShapeStudio() {
           <label className="export-select"><span>Image long edge</span><select value={exportSize} onChange={(event) => setExportSize(Number(event.target.value))}><option value="2048">2,048 px</option><option value="4096">4,096 px</option><option value="6000">6,000 px</option></select></label>
           <div className="still-export-actions">
             <button type="button" className="primary-button" onClick={exportImage} disabled={!shapes.length}>Export PNG <span>{imageDimensions.width} × {imageDimensions.height}</span></button>
-            {mediaKind === "image" && <button type="button" className="svg-button" onClick={exportSvg} disabled={!shapes.length}>Export SVG <span>Vector container</span></button>}
+            {mediaKind === "image" && <button type="button" className="svg-button" onClick={exportSvg} disabled={!shapes.length}>Export Web SVG <span>Browser optimized</span></button>}
+            {mediaKind === "image" && <button type="button" className="svg-button illustrator-button" onClick={exportIllustratorSvg} disabled={!shapes.length}>Illustrator SVG <span>Compact vector symbols</span></button>}
           </div>
+          {mediaKind === "image" && <p className="vector-note">For fully vector artwork, upload SVG shapes. In Illustrator choose Select All → Object → Expand to edit individual instances.</p>}
 
           <div className="setup-actions">
             <button type="button" onClick={saveSetup} disabled={!shapes.length}>Save setup</button>
@@ -1248,4 +1408,3 @@ function Toggle({ label, checked, onChange }: { label: string; checked: boolean;
     <label className="toggle"><span>{label}</span><input type="checkbox" checked={checked} onChange={(event) => onChange(event.target.checked)} /><i /></label>
   );
 }
-
