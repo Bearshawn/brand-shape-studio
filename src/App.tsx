@@ -38,6 +38,12 @@ type RenderOptions = {
   outputWhite: number;
 };
 
+type StudioSnapshot = RenderOptions & {
+  aspectPreset: AspectPreset;
+  shapes: ShapeItem[];
+  paletteName: string;
+};
+
 const MAX_SHAPES = 5;
 const DEFAULT_COLORS = ["#F4FF65", "#FF6B45", "#7C6CFF", "#45D6A8", "#FF78B8"];
 
@@ -331,6 +337,95 @@ function downloadBlob(blob: Blob, filename: string) {
   window.setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
+function escapeXml(value: string) {
+  return value.replace(/[&<>"']/g, (character) => ({
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    '"': "&quot;",
+    "'": "&apos;",
+  })[character] ?? character);
+}
+
+function buildMosaicSvg(
+  source: CanvasImageSource,
+  shapes: ShapeItem[],
+  options: RenderOptions,
+  width: number,
+  height: number,
+) {
+  const cell = width / options.columns;
+  const rows = Math.round(height / cell);
+  const analysis = document.createElement("canvas");
+  analysis.width = options.columns;
+  analysis.height = rows;
+  const analysisContext = analysis.getContext("2d", { willReadFrequently: true });
+  if (!analysisContext) return "";
+
+  const sourceSize = getSourceSize(source);
+  drawSource(
+    analysisContext,
+    source,
+    sourceSize.width,
+    sourceSize.height,
+    options.columns,
+    rows,
+    options.fit,
+    options.sourceZoom,
+    options.sourceOffsetX,
+    options.sourceOffsetY,
+  );
+  const pixels = analysisContext.getImageData(0, 0, options.columns, rows).data;
+  const definitions = shapes.map((shape, index) => `
+    <g id="shape-${index}"><image href="${escapeXml(shape.url)}" x="-0.5" y="-0.5" width="1" height="1" preserveAspectRatio="xMidYMid meet"/></g>
+    <filter id="tint-${index}" x="-10%" y="-10%" width="120%" height="120%" color-interpolation-filters="sRGB">
+      <feFlood flood-color="${escapeXml(shape.color)}" result="color"/>
+      <feComposite in="color" in2="SourceAlpha" operator="in"/>
+    </filter>`).join("");
+  const symbols: string[] = [];
+
+  for (let row = 0; row < rows; row += 1) {
+    for (let column = 0; column < options.columns; column += 1) {
+      const pixelIndex = (row * options.columns + column) * 4;
+      const red = pixels[pixelIndex];
+      const green = pixels[pixelIndex + 1];
+      const blue = pixels[pixelIndex + 2];
+      let luminance = (0.2126 * red + 0.7152 * green + 0.0722 * blue) / 255;
+      const inputRange = Math.max(1 / 255, (options.inputWhite - options.inputBlack) / 255);
+      luminance = clamp((luminance - options.inputBlack / 255) / inputRange);
+      luminance = Math.pow(luminance, 1 / options.gamma);
+      luminance = options.outputBlack / 255 + luminance * ((options.outputWhite - options.outputBlack) / 255);
+      luminance = clamp((luminance - 0.5) * options.contrast + 0.5 + options.threshold);
+      let weight = options.inverted ? luminance : 1 - luminance;
+      weight = clamp(weight);
+
+      let shapeIndex = 0;
+      if (options.mapping === "tone") {
+        shapeIndex = Math.min(shapes.length - 1, Math.floor((1 - weight) * shapes.length));
+      } else if (options.mapping === "sequence") {
+        shapeIndex = (column + row) % shapes.length;
+      } else {
+        shapeIndex = Math.floor(seededRandom(column, row) * shapes.length);
+      }
+
+      const scale = options.minScale + weight * (options.maxScale - options.minScale);
+      const drawSize = cell * scale;
+      if (scale <= 0.025 || drawSize < 1.5) continue;
+      const centerX = column * cell + cell / 2;
+      const centerY = row * cell + cell / 2;
+      symbols.push(`<use href="#shape-${shapeIndex}" filter="url(#tint-${shapeIndex})" transform="translate(${centerX.toFixed(3)} ${centerY.toFixed(3)}) rotate(${options.rotation}) scale(${drawSize.toFixed(3)})"/>`);
+    }
+  }
+
+  const background = options.transparent ? "" : `<rect width="100%" height="100%" fill="${escapeXml(options.background)}"/>`;
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">
+  <defs>${definitions}</defs>
+  ${background}
+  ${symbols.join("\n  ")}
+</svg>`;
+}
+
 export default function ShapeStudio() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const histogramRef = useRef<HTMLCanvasElement>(null);
@@ -339,6 +434,11 @@ export default function ShapeStudio() {
   const mediaUrlRef = useRef<string | null>(null);
   const animationRef = useRef<number | null>(null);
   const recordingRef = useRef<MediaRecorder | null>(null);
+  const historyRef = useRef<StudioSnapshot[]>([]);
+  const lastSnapshotRef = useRef<StudioSnapshot | null>(null);
+  const lastSnapshotSignatureRef = useRef("");
+  const historyReadyRef = useRef(false);
+  const isRestoringHistoryRef = useRef(false);
 
   const [sourceName, setSourceName] = useState("Studio sample");
   const [mediaKind, setMediaKind] = useState<MediaKind>("image");
@@ -373,6 +473,8 @@ export default function ShapeStudio() {
   const [videoDuration, setVideoDuration] = useState(0);
   const [isExportingVideo, setIsExportingVideo] = useState(false);
   const [exportProgress, setExportProgress] = useState(0);
+  const [showOriginal, setShowOriginal] = useState(false);
+  const [historyDepth, setHistoryDepth] = useState(0);
   const [message, setMessage] = useState("Sample loaded. Upload your own source and brand shapes when ready.");
 
   const options = useMemo<RenderOptions>(() => ({
@@ -397,6 +499,20 @@ export default function ShapeStudio() {
     outputWhite,
   }), [columns, minScale, maxScale, contrast, threshold, rotation, mapping, fit, inverted, transparent, background, sourceZoom, sourceOffsetX, sourceOffsetY, inputBlack, gamma, inputWhite, outputBlack, outputWhite]);
 
+  const currentSnapshot = useMemo<StudioSnapshot>(() => ({
+    ...options,
+    aspectPreset,
+    shapes,
+    paletteName,
+  }), [aspectPreset, options, paletteName, shapes]);
+
+  const snapshotSignature = useMemo(() => JSON.stringify({
+    ...options,
+    aspectPreset,
+    paletteName,
+    shapes: shapes.map(({ id, name, url, color }) => ({ id, name, url, color })),
+  }), [aspectPreset, options, paletteName, shapes]);
+
   const aspect = useMemo(() => {
     if (aspectPreset === "1:1") return 1;
     if (aspectPreset === "4:5") return 4 / 5;
@@ -408,6 +524,33 @@ export default function ShapeStudio() {
   const previewDimensions = useMemo(() => outputDimensions(aspect, columns, 1280), [aspect, columns]);
   const imageDimensions = useMemo(() => outputDimensions(aspect, columns, exportSize), [aspect, columns, exportSize]);
   const videoDimensions = useMemo(() => outputDimensions(aspect, columns, videoSize), [aspect, columns, videoSize]);
+
+  useEffect(() => {
+    if (!shapes.length) return;
+    if (!historyReadyRef.current) {
+      historyReadyRef.current = true;
+      lastSnapshotRef.current = currentSnapshot;
+      lastSnapshotSignatureRef.current = snapshotSignature;
+      return;
+    }
+    if (isRestoringHistoryRef.current) {
+      isRestoringHistoryRef.current = false;
+      lastSnapshotRef.current = currentSnapshot;
+      lastSnapshotSignatureRef.current = snapshotSignature;
+      return;
+    }
+    if (snapshotSignature === lastSnapshotSignatureRef.current) return;
+
+    const timer = window.setTimeout(() => {
+      if (lastSnapshotRef.current) {
+        historyRef.current = [...historyRef.current, lastSnapshotRef.current].slice(-10);
+        setHistoryDepth(historyRef.current.length);
+      }
+      lastSnapshotRef.current = currentSnapshot;
+      lastSnapshotSignatureRef.current = snapshotSignature;
+    }, 220);
+    return () => window.clearTimeout(timer);
+  }, [currentSnapshot, shapes.length, snapshotSignature]);
 
   useEffect(() => {
     let cancelled = false;
@@ -433,9 +576,18 @@ export default function ShapeStudio() {
     const source = mediaKind === "video" ? videoRef.current : sourceRef.current;
     if (!canvas || !source || !shapes.length) return;
     if (source instanceof HTMLVideoElement && source.readyState < 2) return;
-    renderMosaic(canvas, source, shapes, options, previewDimensions.width, previewDimensions.height);
+    if (showOriginal) {
+      canvas.width = previewDimensions.width;
+      canvas.height = previewDimensions.height;
+      const context = canvas.getContext("2d");
+      const sourceSize = getSourceSize(source);
+      if (!context) return;
+      drawSource(context, source, sourceSize.width, sourceSize.height, canvas.width, canvas.height, options.fit, options.sourceZoom, options.sourceOffsetX, options.sourceOffsetY);
+    } else {
+      renderMosaic(canvas, source, shapes, options, previewDimensions.width, previewDimensions.height);
+    }
     if (histogramRef.current) paintHistogram(histogramRef.current, getHistogram(source, options, aspect));
-  }, [aspect, mediaKind, options, previewDimensions, shapes]);
+  }, [aspect, mediaKind, options, previewDimensions, shapes, showOriginal]);
 
   useEffect(() => {
     if (mediaKind === "image") {
@@ -608,6 +760,39 @@ export default function ShapeStudio() {
     setMessage("Composition and rotation reset. Uploaded shapes now keep their exact orientation.");
   }
 
+  function undoLastChange() {
+    const snapshot = historyRef.current.pop();
+    if (!snapshot) {
+      setMessage("There are no more changes to undo.");
+      return;
+    }
+    isRestoringHistoryRef.current = true;
+    setAspectPreset(snapshot.aspectPreset);
+    setShapes(snapshot.shapes);
+    setPaletteName(snapshot.paletteName);
+    setColumns(snapshot.columns);
+    setMinScale(snapshot.minScale);
+    setMaxScale(snapshot.maxScale);
+    setContrast(snapshot.contrast);
+    setThreshold(snapshot.threshold);
+    setRotation(snapshot.rotation);
+    setMapping(snapshot.mapping);
+    setFit(snapshot.fit);
+    setInverted(snapshot.inverted);
+    setTransparent(snapshot.transparent);
+    setBackground(snapshot.background);
+    setSourceZoom(snapshot.sourceZoom);
+    setSourceOffsetX(snapshot.sourceOffsetX);
+    setSourceOffsetY(snapshot.sourceOffsetY);
+    setInputBlack(snapshot.inputBlack);
+    setGamma(snapshot.gamma);
+    setInputWhite(snapshot.inputWhite);
+    setOutputBlack(snapshot.outputBlack);
+    setOutputWhite(snapshot.outputWhite);
+    setHistoryDepth(historyRef.current.length);
+    setMessage(`Change undone. ${historyRef.current.length} earlier step${historyRef.current.length === 1 ? "" : "s"} available.`);
+  }
+
   function saveSetup() {
     const setup = {
       version: 2,
@@ -661,7 +846,7 @@ export default function ShapeStudio() {
       }
       setShapes(loadedShapes);
       setAspectPreset((["source", "1:1", "4:5", "16:9", "9:16"].includes(setup.aspectPreset) ? setup.aspectPreset : "source") as AspectPreset);
-      setColumns(Number(setup.columns) || 52);
+      setColumns(clamp(Number(setup.columns) || 52, 12, 200));
       setMinScale(Number.isFinite(setup.minScale) ? setup.minScale : 0.08);
       setMaxScale(Number.isFinite(setup.maxScale) ? setup.maxScale : 0.92);
       setContrast(Number.isFinite(setup.contrast) ? setup.contrast : 1.25);
@@ -702,6 +887,25 @@ export default function ShapeStudio() {
       downloadBlob(blob, `brand-shape-${imageDimensions.width}x${imageDimensions.height}.png`);
       setMessage(`PNG exported at ${imageDimensions.width} × ${imageDimensions.height}px.`);
     }, "image/png");
+  }
+
+  function exportSvg() {
+    if (mediaKind !== "image") {
+      setMessage("SVG export is available for still images only.");
+      return;
+    }
+    const source = sourceRef.current;
+    if (!source || !shapes.length) {
+      setMessage("Add a source image and at least one shape before exporting.");
+      return;
+    }
+    const svg = buildMosaicSvg(source, shapes, options, imageDimensions.width, imageDimensions.height);
+    if (!svg) {
+      setMessage("The SVG could not be created in this browser.");
+      return;
+    }
+    downloadBlob(new Blob([svg], { type: "image/svg+xml;charset=utf-8" }), `brand-shape-${imageDimensions.width}x${imageDimensions.height}.svg`);
+    setMessage(`SVG exported with ${columns} columns at ${imageDimensions.width} × ${imageDimensions.height}px.`);
   }
 
   async function exportVideo() {
@@ -776,6 +980,11 @@ export default function ShapeStudio() {
     video.currentTime = value;
     setVideoTime(value);
     drawPreview();
+  }
+
+  function quickSave() {
+    if (mediaKind === "image") exportImage();
+    else exportVideo();
   }
 
   return (
@@ -853,11 +1062,16 @@ export default function ShapeStudio() {
 
         <section className="stage-column">
           <div className="stage-toolbar">
-            <div>
+            <div className="stage-file">
               <span className="status-dot" />
               <span>{sourceName}</span>
             </div>
-            <span>{previewDimensions.width} × {previewDimensions.height} preview</span>
+            <div className="stage-actions" aria-label="Canvas quick actions">
+              <button type="button" className={showOriginal ? "active" : ""} aria-pressed={showOriginal} onClick={() => setShowOriginal((current) => !current)} title="Compare with the original source">◐ <span>Original</span></button>
+              <button type="button" onClick={undoLastChange} disabled={!historyDepth} title="Undo up to 10 recent changes">↶ <span>Undo</span><small>{historyDepth}</small></button>
+              <button id="quick-save" type="button" className="quick-save" onClick={quickSave} disabled={!shapes.length || isExportingVideo} title={mediaKind === "image" ? "Quick save PNG" : "Quick save WebM"}>↓ <span>Quick save</span></button>
+            </div>
+            <span className="preview-size">{previewDimensions.width} × {previewDimensions.height}</span>
           </div>
           <div className={`canvas-stage ${transparent ? "checkerboard" : ""}`}>
             <canvas ref={canvasRef} aria-label="Generated brand-shape preview" />
@@ -938,7 +1152,7 @@ export default function ShapeStudio() {
             ))}
           </div>
 
-          <Control label="Grid columns" value={columns} display={`${columns}`} min={12} max={120} step={1} onChange={setColumns} />
+          <Control label="Grid columns" value={columns} display={`${columns}`} min={12} max={200} step={1} onChange={setColumns} />
           <Control label="Minimum shape" value={minScale} display={`${Math.round(minScale * 100)}%`} min={0} max={1} step={0.01} onChange={setMinScale} />
           <Control label="Maximum shape" value={maxScale} display={`${Math.round(maxScale * 100)}%`} min={0.05} max={1} step={0.01} onChange={setMaxScale} />
           <Control label="Contrast" value={contrast} display={contrast.toFixed(2)} min={0.2} max={3} step={0.05} onChange={setContrast} />
@@ -988,7 +1202,10 @@ export default function ShapeStudio() {
           </div>
 
           <label className="export-select"><span>Image long edge</span><select value={exportSize} onChange={(event) => setExportSize(Number(event.target.value))}><option value="2048">2,048 px</option><option value="4096">4,096 px</option><option value="6000">6,000 px</option></select></label>
-          <button type="button" className="primary-button" onClick={exportImage} disabled={!shapes.length}>Export PNG <span>{imageDimensions.width} × {imageDimensions.height}</span></button>
+          <div className="still-export-actions">
+            <button type="button" className="primary-button" onClick={exportImage} disabled={!shapes.length}>Export PNG <span>{imageDimensions.width} × {imageDimensions.height}</span></button>
+            {mediaKind === "image" && <button type="button" className="svg-button" onClick={exportSvg} disabled={!shapes.length}>Export SVG <span>Vector container</span></button>}
+          </div>
 
           <div className="setup-actions">
             <button type="button" onClick={saveSetup} disabled={!shapes.length}>Save setup</button>
@@ -1021,7 +1238,7 @@ function Control({ label, value, display, min, max, step, onChange }: {
   return (
     <label className="range-control">
       <span><b>{label}</b><output>{display}</output></span>
-      <input type="range" min={min} max={max} step={step} value={value} onChange={(event) => onChange(Number(event.target.value))} />
+      <input aria-label={label} type="range" min={min} max={max} step={step} value={value} onChange={(event) => onChange(Number(event.target.value))} />
     </label>
   );
 }
@@ -1031,3 +1248,4 @@ function Toggle({ label, checked, onChange }: { label: string; checked: boolean;
     <label className="toggle"><span>{label}</span><input type="checkbox" checked={checked} onChange={(event) => onChange(event.target.checked)} /><i /></label>
   );
 }
+
