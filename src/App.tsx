@@ -573,7 +573,7 @@ export default function ShapeStudio() {
   const historyReadyRef = useRef(false);
   const isRestoringHistoryRef = useRef(false);
 
-  const [sourceName, setSourceName] = useState("Studio sample");
+  const [sourceName, setSourceName] = useState("Mountain sample");
   const [mediaKind, setMediaKind] = useState<MediaKind>("image");
   const [mediaUrl, setMediaUrl] = useState("");
   const [sourceAspect, setSourceAspect] = useState(1.5);
@@ -608,7 +608,7 @@ export default function ShapeStudio() {
   const [exportProgress, setExportProgress] = useState(0);
   const [showOriginal, setShowOriginal] = useState(false);
   const [historyDepth, setHistoryDepth] = useState(0);
-  const [message, setMessage] = useState("Sample loaded. Upload your own source and brand shapes when ready.");
+  const [message, setMessage] = useState("Mountain sample loaded. Upload your own source and brand shapes when ready.");
 
   const options = useMemo<RenderOptions>(() => ({
     columns,
@@ -697,8 +697,22 @@ export default function ShapeStudio() {
         color: DEFAULT_COLORS[index],
       })));
     });
-    const sample = createSampleSource();
-    sourceRef.current = sample;
+    loadImage("/default-source.jpg").then((image) => {
+      if (cancelled) return;
+      sourceRef.current = image;
+      setSourceName("Mountain sample");
+      setSourceAspect(image.naturalWidth / image.naturalHeight);
+      setMediaKind("image");
+      setMediaUrl("");
+      setMessage("Mountain sample loaded. Upload your own source and brand shapes when ready.");
+    }).catch(() => {
+      if (cancelled) return;
+      const sample = createSampleSource();
+      sourceRef.current = sample;
+      setSourceName("Studio sample");
+      setSourceAspect(sample.width / sample.height);
+      setMessage("Fallback sample loaded. Upload your own source when ready.");
+    });
     return () => {
       cancelled = true;
     };
@@ -1088,19 +1102,37 @@ export default function ShapeStudio() {
     };
     const sourceStream = videoWithCapture.captureStream?.() ?? videoWithCapture.mozCaptureStream?.();
     sourceStream?.getAudioTracks().forEach((track) => stream.addTrack(track));
-    const mimeCandidates = ["video/webm;codecs=vp9", "video/webm;codecs=vp8", "video/webm"];
-    const mimeType = mimeCandidates.find((candidate) => MediaRecorder.isTypeSupported(candidate)) ?? "";
-    const recorder = new MediaRecorder(stream, mimeType ? { mimeType, videoBitsPerSecond: 12_000_000 } : undefined);
+    const mimeCandidates = [
+      "video/mp4;codecs=avc1.64003E,mp4a.40.2",
+      "video/mp4;codecs=avc1.42E01E,mp4a.40.2",
+      "video/mp4;codecs=avc1.42E01E",
+      "video/mp4",
+    ];
+    const mimeType = mimeCandidates.find((candidate) => MediaRecorder.isTypeSupported(candidate));
+    if (!mimeType) {
+      stream.getTracks().forEach((track) => track.stop());
+      setMessage("This browser cannot create MP4 directly. Update Chrome or Safari, then try again.");
+      return;
+    }
+    let recorder: MediaRecorder;
+    try {
+      recorder = new MediaRecorder(stream, { mimeType, videoBitsPerSecond: 12_000_000 });
+    } catch {
+      stream.getTracks().forEach((track) => track.stop());
+      setMessage("MP4 encoding could not start in this browser. Update Chrome or Safari, then try again.");
+      return;
+    }
     recordingRef.current = recorder;
     const chunks: Blob[] = [];
     recorder.ondataavailable = (event) => {
       if (event.data.size) chunks.push(event.data);
     };
     recorder.onstop = () => {
-      downloadBlob(new Blob(chunks, { type: mimeType || "video/webm" }), "brand-shape-video.webm");
+      downloadBlob(new Blob(chunks, { type: mimeType }), "brand-shape-video.mp4");
       setIsExportingVideo(false);
       setExportProgress(1);
-      setMessage(`Video exported at ${videoDimensions.width} × ${videoDimensions.height}px as WebM.`);
+      stream.getTracks().forEach((track) => track.stop());
+      setMessage(`Video exported at ${videoDimensions.width} × ${videoDimensions.height}px as MP4.`);
     };
 
     setIsExportingVideo(true);
@@ -1227,7 +1259,7 @@ export default function ShapeStudio() {
             <div className="stage-actions" aria-label="Canvas quick actions">
               <button type="button" className={showOriginal ? "active" : ""} aria-pressed={showOriginal} onClick={() => setShowOriginal((current) => !current)} title="Compare with the original source">◐ <span>Original</span></button>
               <button type="button" onClick={undoLastChange} disabled={!historyDepth} title="Undo up to 10 recent changes">↶ <span>Undo</span><small>{historyDepth}</small></button>
-              <button id="quick-save" type="button" className="quick-save" onClick={quickSave} disabled={!shapes.length || isExportingVideo} title={mediaKind === "image" ? "Quick save PNG" : "Quick save WebM"}>↓ <span>Quick save</span></button>
+              <button id="quick-save" type="button" className="quick-save" onClick={quickSave} disabled={!shapes.length || isExportingVideo} title={mediaKind === "image" ? "Quick save PNG" : "Quick save MP4"}>↓ <span>Quick save</span></button>
             </div>
             <span className="preview-size">{previewDimensions.width} × {previewDimensions.height}</span>
           </div>
@@ -1376,7 +1408,7 @@ export default function ShapeStudio() {
           {mediaKind === "video" && (
             <div className="video-export-block">
               <label className="export-select"><span>Video long edge</span><select value={videoSize} onChange={(event) => setVideoSize(Number(event.target.value))}><option value="1080">1,080 px</option><option value="1920">1,920 px</option><option value="2560">2,560 px</option></select></label>
-              <button type="button" className="secondary-button" onClick={exportVideo} disabled={isExportingVideo || !shapes.length}>{isExportingVideo ? `Exporting ${Math.round(exportProgress * 100)}%` : "Export WebM video"}</button>
+              <button type="button" className="secondary-button" onClick={exportVideo} disabled={isExportingVideo || !shapes.length}>{isExportingVideo ? `Exporting ${Math.round(exportProgress * 100)}%` : "Export MP4 video"}</button>
               {isExportingVideo && <progress max="1" value={exportProgress} />}
             </div>
           )}

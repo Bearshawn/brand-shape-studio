@@ -4,7 +4,8 @@
 
 - Compare the generated composition with the original source from the canvas toolbar.
 - Undo up to 10 visual operations.
-- Quick-save still images as PNG and video compositions as WebM.
+- Quick-save still images as PNG and video compositions as MP4 when the browser supports native MP4 recording.
+- Load the supplied mountain photograph as the default source on every visit.
 - Use up to 200 columns.
 - Export static compositions as SVG.
 
@@ -16,6 +17,11 @@
 ## Version 1.2.1
 
 - Add SVG 1.1 and legacy `xlink:href` references alongside modern `href` references for broader Adobe Illustrator compatibility.
+
+## Version 1.3
+
+- Use the supplied mountain photograph as the default source image on every visit.
+- Export uploaded-video compositions as MP4 using the browser's native H.264/MP4 recorder.
 
 Vercel-ready Vite React version of Brand Shape Studio.
 
